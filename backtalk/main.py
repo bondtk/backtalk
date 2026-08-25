@@ -59,7 +59,7 @@ import sys
 import threading
 import time
 
-from backtalk import signals
+from backtalk import scheduler, signals
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import Ears, record_held, warm as warm_ears
@@ -635,6 +635,25 @@ async def amain():
                       can_use_tool=make_permission_gate(mouth),
                       resume_id=resume_id)
 
+    # PROACTIVE REMINDERS: a background thread, independent of the
+    # brain and the mic loop, polling for Apple Reminders and ad-hoc
+    # verbal reminders (schedule_reminder.py) that just came due, and
+    # speaking them straight through the mouth. No agent turn, no
+    # permission ask — same as how the console verbs speak directly.
+    # Daemon thread, same pattern as the typed-input reader below; it
+    # dies with the process, and only runs while backtalk is up.
+    scheduler_stop = threading.Event()
+
+    def _scheduler_loop():
+        while not scheduler_stop.is_set():
+            try:
+                scheduler.check_and_announce(mouth)
+            except Exception as e:
+                log(f"[scheduler] check failed: {e}")
+            scheduler_stop.wait(scheduler.POLL_INTERVAL_S)
+
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
+
     mode = ("hands-free listening (the talk key still works)"
             if _MIC["mode"] == "open"
             else f"push-to-talk ({CFG['ptt_key']})")
@@ -1008,6 +1027,7 @@ async def amain():
     except KeyboardInterrupt:
         pass
     finally:
+        scheduler_stop.set()  # stop polling for due reminders
         _MIC["gen"] += 1     # abort any live open-mic capture promptly
         if speak_task and not speak_task.done():
             speak_task.cancel()
