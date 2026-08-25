@@ -22,8 +22,16 @@ main() {
     echo "wired this folder to updates."
   fi
 
-  git fetch -q origin
-  git log --oneline "..@{u}" 2>/dev/null | sed "s/^/  new: /"
+  # Forked setups (origin = your own copy, upstream = Jared's original)
+  # pull real updates from "upstream"; a plain clone has no such remote,
+  # so "origin" stays the source exactly as before.
+  SRC="origin"
+  if git remote get-url upstream >/dev/null 2>&1; then
+    SRC="upstream"
+  fi
+
+  git fetch -q "$SRC"
+  git log --oneline "..$SRC/main" 2>/dev/null | sed "s/^/  new: /"
 
   # one-time migration: the config moved out of git tracking. If git here
   # still tracks the old copy, lift yours aside, let the pull retire the
@@ -33,7 +41,15 @@ main() {
     cp "$CFG" "$CFG.mine" && git checkout -q -- "$CFG" && MIGRATE=1
   fi
 
-  git pull --ff-only || echo "  (couldn't fast-forward; your local edits win.)"
+  if git merge --ff-only -q "$SRC/main"; then
+    # forked setup: mirror the update back to your own fork too
+    if [ "$SRC" != "origin" ] && git remote get-url origin >/dev/null 2>&1; then
+      git push -q origin main 2>/dev/null \
+        || echo "  (couldn't push to origin; update pulled locally either way.)"
+    fi
+  else
+    echo "  (couldn't fast-forward; your local edits win.)"
+  fi
 
   if [ "$MIGRATE" = 1 ] && [ -f "$CFG.mine" ]; then
     mv "$CFG.mine" "$CFG"
