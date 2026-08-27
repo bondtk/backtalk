@@ -727,6 +727,16 @@ async def amain():
         log(f"[backtalk] ignoring unknown effort {boot_effort!r} in config")
 
     speak_task: asyncio.Task | None = None
+
+    # The static "greeting" above is just filler for brain-connect dead
+    # air. This fires the real one: a genuine first turn once ready, so
+    # it checks memory and replies naturally instead of canned text.
+    signals.set_state("thinking")
+    signals.static_start()
+    await brain.reset_turn()
+    speak_task = asyncio.create_task(
+        speak_reply(brain, mouth, "(backtalk session started — greet me)"))
+
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()
     typed_fut: asyncio.Future | None = None
