@@ -18,22 +18,39 @@
 """Proactive spoken reminders — Apple Reminders due right now, plus
 ad-hoc verbal reminders queued mid-conversation (see
 schedule_reminder.py: "remind me at 3 to take my medicine" becomes a
-queued entry here). A background thread in main.py polls this on an
-interval and speaks anything due straight through the mouth — no agent
-turn, no permission ask, just talking, same as the "usage report"
-console line does. Only fires while backtalk itself is running; there
-is no wake-from-nothing here.
+queued entry here). Also proactively warns when Troy's Claude plan
+usage (five-hour session window / weekly window) crosses 50/80/90%,
+so he's never surprised by hitting a hard limit mid-task. A background
+thread in main.py polls this on an interval and speaks anything due
+straight through the mouth — no agent turn, no permission ask, just
+talking, same as the "usage report" console line does. Only fires
+while backtalk itself is running; there is no wake-from-nothing here.
 """
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
 
+from backtalk.config import CFG
 from backtalk.vlog import log
 
 REPO = Path(__file__).resolve().parent.parent
 VERBAL_QUEUE_PATH = REPO / "verbal_reminders.json"
 _ANNOUNCED_PATH = REPO / ".apple_reminders_announced.json"
+_USAGE_WARNED_PATH = REPO / ".usage_warned.json"
+
+# Plan usage is checked far less often than the 30s reminder poll — it
+# shells out to a fresh `claude -p` call, cheap but not free, so this
+# throttles it independently within the same poll cycle.
+USAGE_CHECK_INTERVAL_S = 900
+USAGE_THRESHOLDS = (50, 80, 90)
+_usage_last_check = 0.0
+
+_USAGE_SESSION_RE = re.compile(
+    r"Current session:\s*(\d+)%\s*used\s*\S\s*resets\s*([^\n(]+)")
+_USAGE_WEEK_RE = re.compile(
+    r"Current week[^:\n]*:\s*(\d+)%\s*used\s*\S\s*resets\s*([^\n(]+)")
 
 # A reminder counts as "due" from the moment it passes until this many
 # seconds later — wide enough to survive a missed poll cycle or the
@@ -44,16 +61,33 @@ POLL_INTERVAL_S = 30
 
 # AppleScript date subtraction (due - now) yields plain seconds, so the
 # comparison never depends on locale-specific date string parsing.
+#
+# Fetches id/name/completed/due-date as four bulk lists per Reminders
+# list, then filters in the loop, instead of `reminders of theList
+# whose completed is false` — that "whose" filter checks the property
+# on every reminder one at a time over Apple Events, a well-documented
+# slow path in Reminders' scripting dictionary. Against Troy's 222
+# reminders across 3 lists this still isn't fast (Reminders' own
+# iCloud sync overhead dominates either way), so the real fix is a
+# generous subprocess timeout (see _due_apple_reminders) rather than
+# expecting this to be quick.
 _APPLESCRIPT = '''
 tell application "Reminders"
     set nowDate to current date
     set outStr to ""
     repeat with theList in lists
-        repeat with r in (reminders of theList whose completed is false)
-            set dd to due date of r
-            if dd is not missing value then
-                set deltaSec to (dd - nowDate)
-                set outStr to outStr & (id of r) & tab & (name of r) & tab & deltaSec & linefeed
+        set idList to id of reminders of theList
+        set nameList to name of reminders of theList
+        set completedList to completed of reminders of theList
+        set dueList to due date of reminders of theList
+        set n to count of idList
+        repeat with i from 1 to n
+            if not (item i of completedList) then
+                set dd to item i of dueList
+                if dd is not missing value then
+                    set deltaSec to (dd - nowDate)
+                    set outStr to outStr & (item i of idList) & tab & (item i of nameList) & tab & deltaSec & linefeed
+                end if
             end if
         end repeat
     end repeat
@@ -76,11 +110,38 @@ def _save_announced(data):
         log(f"[scheduler] couldn't persist announced reminders: {e}")
 
 
+def _ensure_reminders_running():
+    """Launch Reminders.app if it's not already running. `open -a`
+    launches faster and more reliably than letting the AppleScript
+    trigger an implicit cold launch itself."""
+    try:
+        check = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to (name of processes) '
+             'contains "Reminders"'],
+            capture_output=True, text=True, timeout=5)
+        if check.stdout.strip() == "true":
+            return
+    except Exception:
+        pass
+    subprocess.run(["open", "-a", "Reminders"], capture_output=True)
+
+
 def _due_apple_reminders():
     """Yields spoken text for each Apple Reminder that just came due."""
+    _ensure_reminders_running()
     try:
+        # AppleScript's "whose completed is false" filter checks that
+        # property on every reminder individually over Apple Events —
+        # a known slow path in Reminders' scripting dictionary. Measured
+        # 10-18s warm against Troy's 222 reminders across 3 lists; the
+        # old 15s timeout was tripping on this legitimately-slow-but-
+        # fine query (the "Reminders query failed" errors seen in the
+        # terminal), not an actual fault. Generous margin here, not a
+        # tighter fix, since this runs in a background thread and
+        # doesn't block anything else.
         r = subprocess.run(["osascript", "-e", _APPLESCRIPT],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, timeout=45)
     except Exception as e:
         log(f"[scheduler] Reminders query failed: {e}")
         return
@@ -143,13 +204,93 @@ def _due_verbal_reminders():
         yield f"Reminder, boss. {text}."
 
 
+def _load_usage_warned():
+    try:
+        return json.loads(_USAGE_WARNED_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_usage_warned(data):
+    try:
+        _USAGE_WARNED_PATH.write_text(json.dumps(data))
+    except OSError as e:
+        log(f"[scheduler] couldn't persist usage warned state: {e}")
+
+
+def _fetch_usage_text():
+    try:
+        r = subprocess.run(
+            ["claude", "-p", "/usage", "--output-format", "text"],
+            capture_output=True, text=True, timeout=30,
+            cwd=CFG["agent_dir"],
+        )
+    except Exception as e:
+        log(f"[scheduler] usage check failed: {e}")
+        return None
+    if r.returncode != 0:
+        log(f"[scheduler] usage check error: {r.stderr.strip()[:200]}")
+        return None
+    return r.stdout
+
+
+def _due_usage_warnings():
+    """Yields a spoken warning whenever Troy's five-hour or weekly plan
+    usage crosses 50/80/90% for the first time in the current window.
+    Throttled to USAGE_CHECK_INTERVAL_S regardless of poll frequency."""
+    global _usage_last_check
+    now = time.time()
+    if now - _usage_last_check < USAGE_CHECK_INTERVAL_S:
+        return
+    _usage_last_check = now
+    text = _fetch_usage_text()
+    if not text:
+        return
+    warned = _load_usage_warned()
+    dirty = False
+    for key, label, pattern in (
+        ("session", "five-hour", _USAGE_SESSION_RE),
+        ("week", "weekly", _USAGE_WEEK_RE),
+    ):
+        m = pattern.search(text)
+        if not m:
+            continue
+        pct = int(m.group(1))
+        state = warned.get(key, {"last_threshold": 0})
+        if pct < state.get("last_threshold", 0):
+            # usage is lower than the last threshold we warned about —
+            # the window rolled over, so thresholds fire again. (Not
+            # keying off the CLI's displayed reset time: it's rounded
+            # to the minute and jitters +/-1 minute between calls,
+            # which would falsely look like a new window every time.)
+            state = {"last_threshold": 0}
+        crossed = [t for t in USAGE_THRESHOLDS
+                   if pct >= t > state.get("last_threshold", 0)]
+        if crossed:
+            top = max(crossed)
+            state["last_threshold"] = top
+            warned[key] = state
+            dirty = True
+            yield (f"Heads up, boss — your {label} Claude usage just "
+                   f"crossed {top} percent.")
+        elif state != warned.get(key):
+            warned[key] = state
+            dirty = True
+    if dirty:
+        _save_usage_warned(warned)
+
+
 def check_and_announce(mouth):
     """One poll cycle: speak anything due, Apple Reminders and verbal
-    alike. Safe to call on a timer — already-announced items never
-    repeat, and a query failure just skips this cycle."""
+    alike, plus any plan-usage threshold just crossed. Safe to call on
+    a timer — already-announced items never repeat, and a query
+    failure just skips this cycle."""
     for line in _due_apple_reminders():
         log(f"[scheduler] {line}")
         mouth.say(line)
     for line in _due_verbal_reminders():
+        log(f"[scheduler] {line}")
+        mouth.say(line)
+    for line in _due_usage_warnings():
         log(f"[scheduler] {line}")
         mouth.say(line)
