@@ -20,16 +20,20 @@ ad-hoc verbal reminders queued mid-conversation (see
 schedule_reminder.py: "remind me at 3 to take my medicine" becomes a
 queued entry here). Also proactively warns when Troy's Claude plan
 usage (five-hour session window / weekly window) crosses 50/80/90%,
-so he's never surprised by hitting a hard limit mid-task. A background
-thread in main.py polls this on an interval and speaks anything due
-straight through the mouth — no agent turn, no permission ask, just
-talking, same as the "usage report" console line does. Only fires
-while backtalk itself is running; there is no wake-from-nothing here.
+so he's never surprised by hitting a hard limit mid-task. Also checks,
+once a week, whether backtalk's own upstream repo has new commits not
+yet pulled into Troy's fork, logging the result straight to his vault.
+A background thread in main.py polls this on an interval and speaks
+anything due straight through the mouth — no agent turn, no permission
+ask, just talking, same as the "usage report" console line does. Only
+fires while backtalk itself is running; there is no wake-from-nothing
+here.
 """
 import json
 import re
 import subprocess
 import time
+from datetime import date
 from pathlib import Path
 
 from backtalk.config import CFG
@@ -39,6 +43,12 @@ REPO = Path(__file__).resolve().parent.parent
 VERBAL_QUEUE_PATH = REPO / "verbal_reminders.json"
 _ANNOUNCED_PATH = REPO / ".apple_reminders_announced.json"
 _USAGE_WARNED_PATH = REPO / ".usage_warned.json"
+_UPSTREAM_CHECK_PATH = REPO / ".upstream_check_state.json"
+_UPSTREAM_VAULT_NOTE = Path(
+    "/Users/troybond/Jarvis-Vault/04 - Personal/Proactive Voice Reminders.md")
+
+# Weekday index (Monday=0 .. Sunday=6) this fires on — Tuesday, per Troy.
+UPSTREAM_CHECK_WEEKDAY = 1
 
 # Plan usage is checked far less often than the 30s reminder poll — it
 # shells out to a fresh `claude -p` call, cheap but not free, so this
@@ -280,6 +290,74 @@ def _due_usage_warnings():
         _save_usage_warned(warned)
 
 
+def _load_upstream_state():
+    try:
+        return json.loads(_UPSTREAM_CHECK_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_upstream_state(data):
+    try:
+        _UPSTREAM_CHECK_PATH.write_text(json.dumps(data))
+    except OSError as e:
+        log(f"[scheduler] couldn't persist upstream-check state: {e}")
+
+
+def _append_upstream_note(body):
+    try:
+        with _UPSTREAM_VAULT_NOTE.open("a") as f:
+            f.write(f"\n## Upstream check — {date.today().isoformat()}\n{body}\n")
+    except OSError as e:
+        log(f"[scheduler] couldn't write upstream-check note: {e}")
+
+
+def _due_upstream_check():
+    """Once a week (UPSTREAM_CHECK_WEEKDAY), checks backtalk's upstream
+    remote (jaredrhod/backtalk) for commits not yet in this fork's main
+    branch. Every other poll cycle this is a single cheap date/state
+    comparison — no subprocess, no network call — so it costs nothing
+    to run on the normal 30s cadence. The actual git fetch only happens
+    once, on the one due day, then marks itself done for the ISO week
+    so it won't check again until next week even if polled thousands
+    more times. Read-only: never merges or pulls, just reports."""
+    today = date.today()
+    if today.weekday() != UPSTREAM_CHECK_WEEKDAY:
+        return
+    week_key = list(today.isocalendar()[:2])  # [year, week] — JSON-stable
+    state = _load_upstream_state()
+    if state.get("last_checked_week") == week_key:
+        return
+    try:
+        fetch = subprocess.run(["git", "fetch", "upstream"], cwd=REPO,
+                               capture_output=True, text=True, timeout=30)
+        if fetch.returncode != 0:
+            log(f"[scheduler] upstream fetch failed: {fetch.stderr.strip()[:200]}")
+            return
+        log_r = subprocess.run(
+            ["git", "log", "--oneline", "HEAD..upstream/main"], cwd=REPO,
+            capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        log(f"[scheduler] upstream check failed: {e}")
+        return
+    if log_r.returncode != 0:
+        log(f"[scheduler] upstream log failed: {log_r.stderr.strip()[:200]}")
+        return
+    commits = [ln for ln in log_r.stdout.splitlines() if ln.strip()]
+    state["last_checked_week"] = week_key
+    _save_upstream_state(state)
+    if commits:
+        _append_upstream_note(
+            f"{len(commits)} new commit(s) on jaredrhod/backtalk not yet "
+            f"merged:\n" + "\n".join(f"- {c}" for c in commits))
+        yield (f"Backtalk upstream check, boss — {len(commits)} new "
+               f"commit{'s' if len(commits) != 1 else ''} waiting on the "
+               f"original repo, logged in your vault.")
+    else:
+        _append_upstream_note("Nothing new — fork is caught up.")
+        yield "Backtalk upstream check, boss — nothing new this week, you're caught up."
+
+
 def check_and_announce(mouth):
     """One poll cycle: speak anything due, Apple Reminders and verbal
     alike, plus any plan-usage threshold just crossed. Safe to call on
@@ -292,5 +370,8 @@ def check_and_announce(mouth):
         log(f"[scheduler] {line}")
         mouth.say(line)
     for line in _due_usage_warnings():
+        log(f"[scheduler] {line}")
+        mouth.say(line)
+    for line in _due_upstream_check():
         log(f"[scheduler] {line}")
         mouth.say(line)
