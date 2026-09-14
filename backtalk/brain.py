@@ -51,6 +51,15 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
 SESSION_FILE = os.path.join(CFG["signals_dir"], ".backtalk_session")
 
 
+def _timestamp_tag() -> str:
+    """A system-reminder-style tag carrying the real wall-clock time,
+    computed fresh at call time — prepended to every real utterance so
+    Claude never has to remember to check the clock across a gap in
+    conversation (see the my-agent capability backlog, Idea 1)."""
+    stamp = datetime.now().astimezone().strftime("%A, %B %d, %Y, %I:%M %p %Z")
+    return f"<system-reminder>Current local time: {stamp}</system-reminder>\n"
+
+
 class WarmBrain:
     def __init__(self, model: str | None = None, can_use_tool=None,
                  resume_id: str | None = None):
@@ -312,7 +321,7 @@ class WarmBrain:
     async def ask_stream(self, utterance: str):
         """Yield complete sentences as they stream out of the model."""
         self._dirty = True             # in flight until its ResultMessage
-        await self._client.query(utterance)
+        await self._client.query(_timestamp_tag() + utterance)
         buf = ""
         async for msg in self._client.receive_response():
             t = type(msg).__name__
