@@ -41,7 +41,7 @@ RATE = 16000
 FRAME_MS = 30
 FRAME_LEN = RATE * FRAME_MS // 1000  # samples per frame
 OPEN_FRAMES = 4        # ~120ms speech to open an utterance
-MAX_UTTER_S = 30
+MAX_UTTER_S = 60
 
 _NONSPEECH = re.compile(r"[\[(][^\])]*[\])]")
 
