@@ -693,6 +693,7 @@ async def amain():
     log(f"[backtalk] up — agent={NAME} dir={CFG['agent_dir']} "
         f"model={brain.model} mic={mode} "
         f"(say 'goodbye {NAME.lower()}' to hang up)")
+    signals.set_model(brain.model)
     mouth.say(CFG["greeting"])
 
     loop = asyncio.get_event_loop()
@@ -885,6 +886,10 @@ async def amain():
                 mouth.say(say_after)
                 if resp:
                     log(f"[console] {verb} confirmed: {resp[:120]}")
+                if verb == "deep":
+                    signals.set_model(CFG["deep_model"])
+                elif verb == "fast":
+                    signals.set_model(CFG["model"])
         signals.set_state("idle")
 
     async def handle(text: str, spoke_from: float | None = None) -> bool:

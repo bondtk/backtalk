@@ -147,6 +147,25 @@ def reply_done():
 _rate_limits: dict = {}
 
 
+def set_model(model_id: str):
+    """Which model is answering right now, for a face to show under the
+    usage windows. Rides the same file as the usage readout so a face
+    reads one payload, not two. A model name is not spend, so unlike
+    set_rate_limit this is written regardless of show_usage.
+
+    Stored pretty ("claude-opus-5-5" -> "Opus 5.5") so every face shows
+    the same words. Never raises."""
+    try:
+        parts = str(model_id).replace("claude-", "").split("-")
+        name = parts[0].capitalize()
+        ver = ".".join(p for p in parts[1:] if p.isdigit() and len(p) <= 2)
+        _rate_limits["model"] = f"{name} {ver}".strip()
+        with open(_RATE_LIMIT_FILE, "w") as f:
+            f.write(json.dumps(_rate_limits))
+    except Exception:
+        pass
+
+
 def set_rate_limit(window: str, utilization, resets_at):
     """One usage window's reading — how much of the plan is spent.
 
