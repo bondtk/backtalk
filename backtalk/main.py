@@ -883,6 +883,8 @@ async def amain():
                 log(f"[console] {verb} answered: {resp[:120]}")
             else:
                 mouth.say(say_after)
+                if resp:
+                    log(f"[console] {verb} confirmed: {resp[:120]}")
         signals.set_state("idle")
 
     async def handle(text: str, spoke_from: float | None = None) -> bool:

@@ -103,6 +103,7 @@ class WarmBrain:
         def _opts(rid):
             return ClaudeAgentOptions(
                 cwd=CFG["agent_dir"],
+                cli_path="/Users/troybond/.local/bin/claude",
                 model=self.model,
                 system_prompt={"type": "preset", "preset": "claude_code",
                                "append": DISCIPLINE},
