@@ -54,6 +54,7 @@ Say "goodbye <name>" / "end voice mode" to hang up. Ctrl-C works.
 """
 import asyncio
 import json
+import os
 import queue
 import re
 import socket
@@ -1117,6 +1118,14 @@ async def amain():
         signals.set_state("idle")
         await brain.stop()
         log("[backtalk] hung up")
+        # "hard_exit": true (the phone-call copy) leaves right here. A
+        # lingering audio thread holds asyncio.run open after cleanup, and
+        # the call wrapper only hangs the line once this process is gone.
+        # Off by default.
+        if CFG.get("hard_exit", False):
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
 
 
 # Loopback port used purely as a mutex. Nothing is ever served on it.

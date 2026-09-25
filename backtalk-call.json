@@ -17,8 +17,15 @@
   "boot_greet": false,
   "instance_port": 8792,
   "ptt_key": "f19",
+  "hard_exit": true,
   "quit_phrases": [
-    "end the call now",
-    "goodbye jarvis"
+    "goodbye",
+    "good bye",
+    "bye bye",
+    "hang up",
+    "end the call",
+    "end call",
+    "in the call now",
+    "and the call now"
   ]
 }
