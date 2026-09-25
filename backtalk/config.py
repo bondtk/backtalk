@@ -86,6 +86,13 @@ DEFAULTS = {
     # Extra folders the agent may access beyond agent_dir (e.g. your
     # notes vault). Absolute paths or ~ paths.
     "extra_dirs": [],
+    # Hard tool limits, for a session that should only look things up
+    # (e.g. a phone-call copy). "tools" is a whitelist of the built-in
+    # tools the session gets (null = the normal full set); "disallowed_tools"
+    # is a blocklist on top of it (e.g. "mcp__chrome-devtools" blocks a
+    # whole MCP server). Both default to no limit.
+    "tools": None,
+    "disallowed_tools": [],
     # Hold-to-talk key. Named keys ("home", "f13", "right_alt", ...)
     # or a single character.
     "ptt_key": "home",

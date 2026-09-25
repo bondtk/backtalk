@@ -125,6 +125,8 @@ class WarmBrain:
                 permission_mode=sdk_mode,
                 can_use_tool=self._can_use_tool,
                 add_dirs=CFG["extra_dirs"],
+                tools=CFG["tools"],
+                disallowed_tools=CFG["disallowed_tools"],
                 skills=CFG["visible_skills"],
                 resume=rid,
                 max_buffer_size=10 * 1024 * 1024,

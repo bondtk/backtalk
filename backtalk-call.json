@@ -26,5 +26,13 @@
     "in the call now",
     "and the call now"
   ],
-  "bg_pump": false
+  "bg_pump": false,
+  "extra_dirs": [
+    "/Users/troybond/Jarvis-Vault"
+  ],
+  "tools": [
+    "Read",
+    "Grep",
+    "Glob"
+  ]
 }
