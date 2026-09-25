@@ -747,11 +747,16 @@ async def amain():
     # The static "greeting" above is just filler for brain-connect dead
     # air. This fires the real one: a genuine first turn once ready, so
     # it checks memory and replies naturally instead of canned text.
-    signals.set_state("thinking")
-    signals.static_start()
-    await brain.reset_turn()
-    speak_task = asyncio.create_task(
-        speak_reply(brain, mouth, "(backtalk session started — greet me)"))
+    # "boot_greet": false skips it (the phone-call copy, where the caller
+    # speaks first). On by default.
+    if CFG.get("boot_greet", True):
+        signals.set_state("thinking")
+        signals.static_start()
+        await brain.reset_turn()
+        speak_task = asyncio.create_task(
+            speak_reply(brain, mouth, "(backtalk session started — greet me)"))
+    else:
+        signals.set_state("idle")
 
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()

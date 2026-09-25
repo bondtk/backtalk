@@ -338,7 +338,12 @@ def transcribe(pcm: np.ndarray) -> str:
     else:
         segments, _ = model.transcribe(audio, temperature=0.0, language=lang)
         text = "".join(s.text for s in segments).strip()
-    return _NONSPEECH.sub("", text).strip()
+    text = _NONSPEECH.sub("", text).strip()
+    # Whisper turns line noise (a phone answering, a click) into lone
+    # punctuation like "!". With no letter or digit in it, it's silence.
+    if not any(c.isalnum() for c in text):
+        return ""
+    return text
 
 
 class Ears:
