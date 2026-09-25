@@ -580,10 +580,12 @@ def _typed_reader(q: "queue.Queue[str]"):
                 sys.stdout.flush()
 
 
-async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
+async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str,
+                      stream=None, interrupt_on_cancel: bool = True):
     """First sentence ships alone (fast start); the rest go in
     2-sentence breaths — fuller chunks get livelier prosody (single
-    short sentences come out flat)."""
+    short sentences come out flat). `stream` replaces the normal ask with
+    another sentence source (the idle pump's background_stream)."""
     t0 = time.time()
     first = True
     batch: list[str] = []
@@ -621,7 +623,8 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
                 batch = []
 
     try:
-        async for sentence in brain.ask_stream(text):
+        async for sentence in (stream if stream is not None
+                               else brain.ask_stream(text)):
             emit(sentence)
         if batch:
             mouth.say_chunk(" ".join(batch), pending)
@@ -632,10 +635,11 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
             signals.static_stop()
             signals.set_state("idle")
     except asyncio.CancelledError:
-        try:
-            await brain.interrupt()
-        except Exception:
-            pass
+        if interrupt_on_cancel:
+            try:
+                await brain.interrupt()
+            except Exception:
+                pass
         raise
 
 
@@ -745,6 +749,52 @@ async def amain():
 
     speak_task: asyncio.Task | None = None
 
+    # IDLE PUMP: a turn the session starts by itself (a finished background
+    # task) used to sit unread until the NEXT question, then get spoken at
+    # the start of that answer and confuse the sync. While nothing else is
+    # using the brain, this task waits for such a turn and speaks it the
+    # moment it happens. handle() stops it before any query goes out, and
+    # brain.reset_turn() cleans up if it was cut off mid-turn.
+    # "bg_pump": false turns it off (the phone-call copy).
+    pump_task: asyncio.Task | None = None
+    pump_state = {"handling": 0, "down": False}
+
+    async def _pump_run():
+        try:
+            await speak_reply(brain, mouth, None,
+                              stream=brain.background_stream(),
+                              interrupt_on_cancel=False)
+        except asyncio.CancelledError:
+            if brain._dirty:      # cut off mid-turn, not merely waiting
+                try:
+                    await brain.interrupt()
+                except Exception:
+                    pass
+            raise
+        except Exception as e:
+            log(f"[pump] background turn failed: {e!r}")
+            await asyncio.sleep(2)
+
+    def arm_pump():
+        nonlocal pump_task
+        if (not CFG.get("bg_pump", True) or pump_state["down"]
+                or pump_state["handling"]
+                or (pump_task and not pump_task.done())
+                or (speak_task and not speak_task.done())):
+            return
+        pump_task = asyncio.create_task(_pump_run())
+        pump_task.add_done_callback(lambda _t: arm_pump())
+
+    async def stop_pump():
+        nonlocal pump_task
+        if pump_task and not pump_task.done():
+            pump_task.cancel()
+            try:
+                await pump_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        pump_task = None
+
     # The static "greeting" above is just filler for brain-connect dead
     # air. This fires the real one: a genuine first turn once ready, so
     # it checks memory and replies naturally instead of canned text.
@@ -756,8 +806,10 @@ async def amain():
         await brain.reset_turn()
         speak_task = asyncio.create_task(
             speak_reply(brain, mouth, "(backtalk session started — greet me)"))
+        speak_task.add_done_callback(lambda _t: arm_pump())
     else:
         signals.set_state("idle")
+        arm_pump()
 
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()
@@ -908,6 +960,18 @@ async def amain():
         signals.set_state("idle")
 
     async def handle(text: str, spoke_from: float | None = None) -> bool:
+        """Run _handle with the idle pump held off, then re-arm it."""
+        pump_state["handling"] += 1
+        try:
+            keep_going = await _handle(text, spoke_from)
+            if not keep_going:
+                pump_state["down"] = True
+            return keep_going
+        finally:
+            pump_state["handling"] -= 1
+            arm_pump()
+
+    async def _handle(text: str, spoke_from: float | None = None) -> bool:
         """Process one utterance; returns False on quit. spoke_from is
         when the utterance STARTED (the PTT press), so an answer can be
         told apart from speech that began before the ask even existed."""
@@ -959,6 +1023,8 @@ async def amain():
             mouth.say(CFG["signoff"])
             mouth.wait_done(timeout=15)
             return False
+        # Nothing else may read the brain's pipe once a query is coming.
+        await stop_pump()
         if speak_task and not speak_task.done():
             log("[turn] interrupted mid-reply by new input")
             _deny_pending()          # an ask never outlives its turn
@@ -990,6 +1056,7 @@ async def amain():
         _deny_pending()
         await brain.reset_turn()
         speak_task = asyncio.create_task(speak_reply(brain, mouth, text))
+        speak_task.add_done_callback(lambda _t: arm_pump())
         return True
 
     try:
@@ -1109,6 +1176,9 @@ async def amain():
         pass
     finally:
         scheduler_stop.set()  # stop polling for due reminders
+        pump_state["down"] = True
+        if pump_task and not pump_task.done():
+            pump_task.cancel()
         sms_watch.stop_child()
         _MIC["gen"] += 1     # abort any live open-mic capture promptly
         if speak_task and not speak_task.done():

@@ -94,6 +94,10 @@ class WarmBrain:
         # True while a query's response hasn't been consumed through its
         # ResultMessage — i.e. the shared message pipe may hold leftovers.
         self._dirty = False
+        # True when the dirty turn is one the SESSION started on its own
+        # (background_stream), whose result carries a non-human origin: the
+        # reset_turn drain must then stop at ANY result, not wait for ours.
+        self._bg_dirty = False
 
     async def start(self):
         mode = CFG["permission_mode"]
@@ -299,7 +303,7 @@ class WarmBrain:
 
         async def _drain() -> int:
             n = 0
-            async for _ in self._msgs():
+            async for _ in self._msgs(any_result=self._bg_dirty):
                 n += 1
             return n
 
@@ -307,6 +311,7 @@ class WarmBrain:
             drained = await asyncio.wait_for(_drain(), timeout)
             log(f"[brain] interrupted turn drained ({drained} stale messages)")
             self._dirty = False
+            self._bg_dirty = False
         except Exception:
             # Can't re-align — rebuild the session rather than run
             # desynced. Loses this voice session's conversation memory;
@@ -321,27 +326,83 @@ class WarmBrain:
             self._client = None
             await self.start()
             self._dirty = False
+            self._bg_dirty = False
 
     async def stop(self):
         if self._client:
             await self._client.disconnect()
             self._client = None
 
-    async def _msgs(self):
+    async def _msgs(self, any_result: bool = False):
         """Messages up to and including the ResultMessage of a turn WE
         submitted. receive_response() stops at the FIRST ResultMessage,
         including the one ending a turn the session started on its own
-        (a finished background task), so re-enter it until ours arrives."""
+        (a finished background task), so re-enter it until ours arrives.
+        any_result=True stops at the first result of any origin (draining
+        an interrupted self-started turn, which has no human result)."""
         while True:
             saw_result = False
             async for msg in self._client.receive_response():
                 yield msg
                 if type(msg).__name__ == "ResultMessage":
                     saw_result = True
-                    if _answers_us(msg):
+                    if any_result or _answers_us(msg):
                         return
             if not saw_result:
                 return                 # stream ended without a result
+
+    async def background_stream(self):
+        """Yield the sentences of ONE turn the session starts on its own (a
+        finished background task, a scheduled prompt), the moment it runs.
+
+        THE IDLE PUMP'S HALF: with nobody reading the shared message pipe
+        between questions, such a turn sat unread and was only spoken at
+        the start of the NEXT answer, then shifted everything after it.
+        main.py runs this while idle and speaks what it yields. It blocks
+        until a turn arrives, and must be cancelled (then reset_turn) before
+        any query goes out: two readers on one pipe would steal each
+        other's messages. _dirty is set only once real turn content shows
+        up, so cancelling while merely waiting leaves the pipe clean."""
+        buf = ""
+        saw_result = False
+        async for msg in self._client.receive_response():
+            t = type(msg).__name__
+            if t in ("StreamEvent", "AssistantMessage") and not self._dirty:
+                self._dirty = True
+                self._bg_dirty = True
+            if t == "StreamEvent":
+                ev = getattr(msg, "event", {}) or {}
+                if ev.get("type") == "content_block_delta":
+                    delta = ev.get("delta", {}) or {}
+                    if delta.get("type") == "text_delta":
+                        buf += delta.get("text", "")
+                        while True:
+                            m = _SENTENCE_END.search(buf)
+                            if not m:
+                                break
+                            sentence, buf = (buf[:m.end()].strip(),
+                                             buf[m.end():])
+                            if sentence:
+                                yield sentence
+                elif ev.get("type") == "content_block_stop":
+                    tail = buf.strip()
+                    buf = ""
+                    if tail:
+                        yield tail
+            elif t == "ResultMessage":
+                saw_result = True
+                self._dirty = False
+                self._bg_dirty = False
+                self._tally(msg, count_turn=False)
+                self._remember_session(msg)
+                break
+        tail = buf.strip()
+        if tail:
+            yield tail
+        if not saw_result:
+            # Stream ended with no turn (CLI gone): don't let the caller
+            # spin re-arming us in a hot loop.
+            await asyncio.sleep(2)
 
     async def ask_stream(self, utterance: str):
         """Yield complete sentences as they stream out of the model."""
