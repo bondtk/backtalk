@@ -51,6 +51,16 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
 SESSION_FILE = os.path.join(CFG["signals_dir"], ".backtalk_session")
 
 
+def _answers_us(rm) -> bool:
+    """True when this ResultMessage ends a turn WE submitted. The CLI also
+    starts turns by itself (a finished background task, a scheduled
+    prompt) and tags their result with an origin other than "human"."""
+    origin = getattr(rm, "origin", None)
+    if not isinstance(origin, dict):
+        return True
+    return origin.get("kind") in (None, "human")
+
+
 def _timestamp_tag() -> str:
     """A system-reminder-style tag carrying the real wall-clock time,
     computed fresh at call time — prepended to every real utterance so
@@ -289,10 +299,8 @@ class WarmBrain:
 
         async def _drain() -> int:
             n = 0
-            async for msg in self._client.receive_response():
+            async for _ in self._msgs():
                 n += 1
-                if type(msg).__name__ == "ResultMessage":
-                    break
             return n
 
         try:
@@ -319,12 +327,28 @@ class WarmBrain:
             await self._client.disconnect()
             self._client = None
 
+    async def _msgs(self):
+        """Messages up to and including the ResultMessage of a turn WE
+        submitted. receive_response() stops at the FIRST ResultMessage,
+        including the one ending a turn the session started on its own
+        (a finished background task), so re-enter it until ours arrives."""
+        while True:
+            saw_result = False
+            async for msg in self._client.receive_response():
+                yield msg
+                if type(msg).__name__ == "ResultMessage":
+                    saw_result = True
+                    if _answers_us(msg):
+                        return
+            if not saw_result:
+                return                 # stream ended without a result
+
     async def ask_stream(self, utterance: str):
         """Yield complete sentences as they stream out of the model."""
         self._dirty = True             # in flight until its ResultMessage
         await self._client.query(_timestamp_tag() + utterance)
         buf = ""
-        async for msg in self._client.receive_response():
+        async for msg in self._msgs():
             t = type(msg).__name__
             if t == "StreamEvent":
                 ev = getattr(msg, "event", {}) or {}
@@ -353,6 +377,18 @@ class WarmBrain:
                     if tail:
                         yield tail
             elif t == "ResultMessage":
+                if not _answers_us(msg):
+                    # A turn the session started ON ITS OWN (a background
+                    # task finished, a scheduled prompt fired). Its result
+                    # is not the answer to our query: keep reading for the
+                    # real one, or every reply after this lands one
+                    # message late. Whatever it said was already spoken.
+                    tail = buf.strip()
+                    buf = ""
+                    if tail:
+                        yield tail
+                    self._tally(msg, count_turn=False)
+                    continue
                 self._dirty = False    # turn fully consumed — pipe aligned
                 self._tally(msg)
                 self._remember_session(msg)

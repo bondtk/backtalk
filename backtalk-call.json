@@ -18,6 +18,7 @@
   "instance_port": 8792,
   "ptt_key": "f19",
   "hard_exit": true,
+  "stt_filter_ghosts": true,
   "quit_phrases": [
     "goodbye",
     "good bye",

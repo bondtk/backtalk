@@ -29,6 +29,7 @@ import platform
 import re
 import sys
 import threading
+import zlib
 
 import numpy as np
 import sounddevice as sd
@@ -330,15 +331,43 @@ def transcribe(pcm: np.ndarray) -> str:
     model = warm()
     audio = pcm.astype(np.float32) / 32768.0
     lang = "en" if CFG["stt_model"].endswith(".en") else None
+    scores = []   # (no_speech_prob, avg_logprob) per segment
     if _backend == "mlx":
         import mlx_whisper
-        text = mlx_whisper.transcribe(audio, path_or_hf_repo=model,
-                                      temperature=0.0, language=lang,
-                                      verbose=None)["text"].strip()
+        res = mlx_whisper.transcribe(audio, path_or_hf_repo=model,
+                                     temperature=0.0, language=lang,
+                                     verbose=None)
+        text = res["text"].strip()
+        scores = [(s.get("no_speech_prob", 0.0), s.get("avg_logprob", 0.0))
+                  for s in res.get("segments", [])]
     else:
         segments, _ = model.transcribe(audio, temperature=0.0, language=lang)
+        segments = list(segments)
         text = "".join(s.text for s in segments).strip()
+        scores = [(s.no_speech_prob, s.avg_logprob) for s in segments]
     text = _NONSPEECH.sub("", text).strip()
+    # "stt_filter_ghosts": true (the phone-call copy) drops clips Whisper
+    # itself scores as probably silence, or is unsure of. Line hiss makes
+    # it invent "Thank you." with nothing said. Every clip's scores are
+    # logged so the cutoffs can be tuned from real calls. Off by default.
+    if text and scores and CFG.get("stt_filter_ghosts", False):
+        nsp = sum(s[0] for s in scores) / len(scores)
+        lp = sum(s[1] for s in scores) / len(scores)
+        # A steady machine hum can also send Whisper into a loop ("and the
+        # people who are using" x40) that it scores as confident speech.
+        # Looped text compresses to almost nothing; real sentences don't.
+        raw = text.encode()
+        ratio = len(raw) / max(1, len(zlib.compress(raw)))
+        looped = len(text) >= 80 and ratio > float(
+            CFG.get("stt_ghost_repeat_ratio", 2.4))
+        ghost = (looped
+                 or nsp > float(CFG.get("stt_ghost_no_speech", 0.5))
+                 or lp < float(CFG.get("stt_ghost_logprob", -1.0)))
+        log(f"[ears] scores no_speech={nsp:.2f} logprob={lp:.2f} "
+            f"repeat={ratio:.1f}{' DROPPED as ghost' if ghost else ''}"
+            f" :: {text[:160]!r}")
+        if ghost:
+            return ""
     # Whisper turns line noise (a phone answering, a click) into lone
     # punctuation like "!". With no letter or digit in it, it's silence.
     if not any(c.isalnum() for c in text):
