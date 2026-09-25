@@ -1,0 +1,23 @@
+{
+  "agent_dir": "/Users/troybond/my-agent/call-mode",
+  "name": "Jarvis",
+  "mic_mode": "open",
+  "mic_device": "BlackHole 16ch",
+  "speaker_device": "BlackHole 2ch",
+  "voice": "bm_lewis",
+  "stt_model": "small.en",
+  "permission_mode": "ask",
+  "signals_dir": "/Users/troybond/my-agent/call-mode/signals",
+  "thinking_sound": "",
+  "greeting": "",
+  "greeting_open_mic": "",
+  "signoff": "Talk soon, sir.",
+  "show_usage": false,
+  "scheduler": false,
+  "instance_port": 8792,
+  "ptt_key": "f19",
+  "quit_phrases": [
+    "end the call now",
+    "goodbye jarvis"
+  ]
+}

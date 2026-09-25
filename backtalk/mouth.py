@@ -332,6 +332,43 @@ def synth_stream(text: str, timeout: float = 30.0):
         yield KOKORO_RATE, pcm
 
 
+_speaker_warned = False
+
+
+def _speaker_index():
+    """Resolve speaker_device (a device NAME) to an output index, or None
+    for the system default. Same rules as ears._mic_index: name not index,
+    exact match first, then first case-insensitive substring, re-resolved
+    on every stream open. Blank (the default) returns None, so behavior is
+    exactly what it was before this setting existed."""
+    global _speaker_warned
+    want = str(CFG.get("speaker_device", "") or "").strip()
+    if not want:
+        return None
+    try:
+        devices = sd.query_devices()
+    except Exception as e:
+        log(f"[mouth] could not list audio devices ({e}) -- using the "
+            f"default speaker")
+        return None
+    outs = [(i, d) for i, d in enumerate(devices)
+            if d.get("max_output_channels", 0) > 0]
+    for i, d in outs:
+        if d["name"] == want:
+            _speaker_warned = False
+            return i
+    low = want.lower()
+    for i, d in outs:
+        if low in d["name"].lower():
+            _speaker_warned = False
+            return i
+    if not _speaker_warned:
+        _speaker_warned = True
+        log(f"[mouth] speaker_device {want!r} not found -- using the system "
+            f"default. Outputs I can see: {[d['name'] for _, d in outs]}")
+    return None
+
+
 class Mouth:
     def __init__(self):
         from backtalk.ducking import Ducker
@@ -435,7 +472,8 @@ class Mouth:
             except Exception:
                 log("[mouth] the output stream went away, reopening")
         self._drop_out()
-        self._out = sd.OutputStream(samplerate=rate, channels=1, dtype="int16")
+        self._out = sd.OutputStream(samplerate=rate, channels=1, dtype="int16",
+                                    device=_speaker_index())
         self._out_rate = rate
         self._out.start()
         return self._out

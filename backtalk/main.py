@@ -61,7 +61,7 @@ import sys
 import threading
 import time
 
-from backtalk import scheduler, signals
+from backtalk import scheduler, signals, sms_watch
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -685,7 +685,11 @@ async def amain():
                 log(f"[scheduler] check failed: {e}")
             scheduler_stop.wait(scheduler.POLL_INTERVAL_S)
 
-    threading.Thread(target=_scheduler_loop, daemon=True).start()
+    # "scheduler": false in a config turns the reminder speaker off (the
+    # phone call-mode copy sets it so it never announces reminders into a
+    # call). Absent or true = on, exactly as before.
+    if CFG.get("scheduler", True):
+        threading.Thread(target=_scheduler_loop, daemon=True).start()
 
     mode = ("hands-free listening (the talk key still works)"
             if _MIC["mode"] == "open"
@@ -752,6 +756,11 @@ async def amain():
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()
     typed_fut: asyncio.Future | None = None
+    # TEXT DOORBELL: "sms_watch": true in the config starts the
+    # zero-token Google Voice poller (see sms_watch.py). Each new text
+    # from Troy's cell arrives here as a typed message. Off by default.
+    if CFG.get("sms_watch", False):
+        sms_watch.start(typed_q, scheduler_stop)
 
     async def run_console(verb):
         """One voice-console verb. The current reply was already
@@ -898,6 +907,10 @@ async def amain():
         told apart from speech that began before the ask even existed."""
         nonlocal speak_task
         log(f"[you]    {text}")
+        # A text message from Troy's cell (sms_watch.py) is DATA: it
+        # never answers a permission ask, confirms a console verb, or
+        # counts as a quit phrase. It goes straight to the agent.
+        is_sms = text.startswith(sms_watch.PREFIX)
         # A pending spoken permission ask owns the next utterance IF
         # that utterance started after the ask was posed. Speech that
         # began earlier is the user interrupting the turn, not
@@ -906,7 +919,8 @@ async def amain():
         # interrupt. Quit wins either way, but only as an EXACT phrase
         # here ("No! Don't hang up, skip it" must stay a deny reason,
         # not kill the session).
-        if _PERM["fut"] is not None and not _PERM["fut"].done():
+        if (not is_sms and _PERM["fut"] is not None
+                and not _PERM["fut"].done()):
             started_after = (spoke_from is None
                              or spoke_from >= _PERM["asked_at"])
             if _norm_speech(text) in {_norm_speech(q)
@@ -921,7 +935,7 @@ async def amain():
         # A pending auto-approve confirm owns it too, for two minutes;
         # after that it expires and speech flows normally again.
         verb = None
-        if _CONFIRM["verb"]:
+        if _CONFIRM["verb"] and not is_sms:
             pend, _CONFIRM["verb"] = _CONFIRM["verb"], None
             expired = time.monotonic() - _CONFIRM["at"] > 120
             if not expired and _norm_speech(text) in (
@@ -932,7 +946,7 @@ async def amain():
                                          for q in QUIT_PHRASES):
                 mouth.say("Staying as we are.")
                 return True
-        if any(q in text.lower() for q in QUIT_PHRASES):
+        if not is_sms and any(q in text.lower() for q in QUIT_PHRASES):
             if speak_task and not speak_task.done():
                 speak_task.cancel()
             mouth.shut_up()
@@ -1089,6 +1103,7 @@ async def amain():
         pass
     finally:
         scheduler_stop.set()  # stop polling for due reminders
+        sms_watch.stop_child()
         _MIC["gen"] += 1     # abort any live open-mic capture promptly
         if speak_task and not speak_task.done():
             speak_task.cancel()
@@ -1126,7 +1141,9 @@ def _claim_single_instance() -> bool:
     # No SO_REUSEADDR here on purpose: reuse is exactly what would let a
     # second instance bind alongside the first and defeat the whole point.
     try:
-        s.bind(("127.0.0.1", _INSTANCE_PORT))
+        # "instance_port" lets a second config (the phone call-mode copy)
+        # hold its own mutex port so both can run. Absent = 8791, as before.
+        s.bind(("127.0.0.1", int(CFG.get("instance_port") or _INSTANCE_PORT)))
         s.listen(1)
     except OSError:
         s.close()

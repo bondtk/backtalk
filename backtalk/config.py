@@ -155,6 +155,12 @@ DEFAULTS = {
     #
     # NOT "stt_device" below, which is the Whisper COMPUTE device.
     "mic_device": "",
+    # Which OUTPUT device the voice speaks through, matched by NAME the
+    # same way as mic_device (exact name first, then case-insensitive
+    # substring). Blank = the system default speaker, exactly as before.
+    # Used by a second "call mode" config to speak into a virtual audio
+    # cable (e.g. "BlackHole 2ch") instead of the room speakers.
+    "speaker_device": "",
     # Optional premium voice: ElevenLabs on YOUR key. The key NEVER
     # goes in a file: it's read from the macOS Keychain (item
     # `backtalk-elevenlabs`) or Linux secret-tool, with the
@@ -273,7 +279,7 @@ def load() -> dict:
     low = name.lower()
     cfg["quit_phrases"] = tuple(cfg.get("quit_phrases") or (
         f"goodbye {low}", f"good bye {low}", "end voice mode",
-        f"hang up {low}", "hang up"))
+        f"hang up {low}"))
     key_label = "the " + str(cfg.get("ptt_key", "home")).replace("_", " ") \
                 + " key"
     # In hands-free there is no key to hold, so a separate line can be set.
