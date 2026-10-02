@@ -40,6 +40,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -65,8 +66,48 @@ _last_waveform_write = 0.0
 _static_proc: subprocess.Popen | None = None
 
 
+_cur_state: str | None = None
+_think_token = 0
+_TERMINAL_STATUS = CFG.get("terminal_status", True)
+_HEARTBEAT_SECONDS = 15
+
+
+def _heartbeat(token: int, started: float):
+    next_beat = _HEARTBEAT_SECONDS
+    while True:
+        time.sleep(1.0)
+        if _think_token != token or _cur_state != "thinking":
+            return
+        elapsed = int(time.time() - started)
+        if elapsed >= next_beat:
+            print(f"(still working, {elapsed}s)", flush=True)
+            next_beat = elapsed + _HEARTBEAT_SECONDS
+
+
+def _announce(prior: str | None, name: str):
+    """Print a one-line terminal status on state changes. Never raises."""
+    global _think_token
+    try:
+        if name == "thinking":
+            _think_token += 1
+            print("(thinking...)", flush=True)
+            threading.Thread(target=_heartbeat,
+                             args=(_think_token, time.time()),
+                             daemon=True).start()
+        elif name == "idle" and prior in ("thinking", "speaking"):
+            print("(done, your turn)", flush=True)
+        elif name == "listening":
+            print("(listening...)", flush=True)
+    except Exception:
+        pass
+
+
 def set_state(name: str):
     """Write the state. Never raises — the show must go on."""
+    global _cur_state
+    prior, _cur_state = _cur_state, name
+    if _TERMINAL_STATUS and name != prior:
+        _announce(prior, name)
     try:
         with open(_STATE_FILE, "w") as f:
             f.write(name)
