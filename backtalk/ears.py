@@ -437,7 +437,7 @@ class Ears:
                         return transcribe(np.concatenate(frames))
 
 
-def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None:
+def record_held(is_held, max_s: float = 900.0, min_s: float = 0.25) -> str | None:
     """Hold-to-talk capture: record raw audio while is_held() is True,
     then transcribe. The button is the VAD — no endpointing. Returns
     None for taps shorter than min_s (accidental presses)."""
