@@ -26,3 +26,5 @@ show.json
 .python-version
 # Config backups the setup wizard leaves behind.
 *.json.*.bak
+# The phone hand-off writes the live session id here at runtime.
+.backtalk_current_session
