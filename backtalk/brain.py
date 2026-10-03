@@ -49,6 +49,10 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
 
 
 SESSION_FILE = os.path.join(CFG["signals_dir"], ".backtalk_session")
+# The live session id, written after every turn whatever resume_last_session
+# says: the phone hand-off (handoff/pass-to-phone.sh) needs it.
+CURRENT_SESSION_FILE = os.path.join(CFG["signals_dir"],
+                                    ".backtalk_current_session")
 
 
 def _answers_us(rm) -> bool:
@@ -91,6 +95,9 @@ class WarmBrain:
         # went sideways mid-stream, the wrong moment to gamble on
         # reattaching. (Community proposal, issue #1.)
         self._resume_id = resume_id
+        # True once start() actually reattached to resume_id (False when
+        # the resume failed and it fell back to a fresh session).
+        self.resumed = False
         # True while a query's response hasn't been consumed through its
         # ResultMessage — i.e. the shared message pipe may hold leftovers.
         self._dirty = False
@@ -136,6 +143,7 @@ class WarmBrain:
                 self._client = ClaudeSDKClient(options=_opts(resume))
                 await self._client.connect()
                 log(f"[brain] resumed session {resume[:8]}")
+                self.resumed = True
                 return
             except Exception as e:
                 # a stale or invalid saved session must never brick the
@@ -166,12 +174,18 @@ class WarmBrain:
 
     def _remember_session(self, rm):
         """Persist the session id after a completed turn, so the next
-        launch can reattach (config: resume_last_session). Must never
-        break a turn; silence on any failure."""
-        if not CFG.get("resume_last_session"):
-            return
+        launch can reattach (config: resume_last_session). The live id
+        also goes to CURRENT_SESSION_FILE for the phone hand-off, resume
+        setting or not. Must never break a turn; silence on any failure."""
         sid = getattr(rm, "session_id", None)
         if not sid:
+            return
+        try:
+            with open(CURRENT_SESSION_FILE, "w") as f:
+                f.write(sid)
+        except OSError:
+            pass
+        if not CFG.get("resume_last_session"):
             return
         try:
             with open(SESSION_FILE, "w") as f:

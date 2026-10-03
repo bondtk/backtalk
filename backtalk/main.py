@@ -643,6 +643,24 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str,
         raise
 
 
+def _claim_baton():
+    """Session id of a phone hand-off waiting for the Mac, else None.
+    Asks handoff/baton.py, which only answers for a live, unclaimed baton
+    pending for the Mac and marks it claimed. Any failure means None, so a
+    problem here can only ever cost a fresh start, never the launch."""
+    import subprocess
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[2] / "handoff" / "baton.py"
+    try:
+        r = subprocess.run([sys.executable, str(script), "claim", "mac"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
 async def amain():
     open_mic = "--open-mic" in sys.argv
     barge_in = "--barge-in" in sys.argv
@@ -666,6 +684,14 @@ async def amain():
                 resume_id = f.read().strip() or None
         except OSError:
             resume_id = None
+    # Phone hand-off: a live baton set for the Mac resumes that
+    # conversation; no baton, an expired or already-claimed one leaves
+    # this the fresh start it always was.
+    handed_off = None
+    if resume_id is None and CFG.get("baton_claim", True):
+        handed_off = resume_id = _claim_baton()
+        if handed_off:
+            log(f"[backtalk] phone hand-off claimed ({handed_off[:8]})")
 
     mouth = Mouth()
     ears = Ears()
@@ -736,6 +762,10 @@ async def amain():
         mouth.wait_done(timeout=30)
         raise SystemExit(1)
     log("[backtalk] brain warm")
+    if handed_off and not brain.resumed:
+        log("[backtalk] phone hand-off claimed but the resume failed")
+        mouth.say("I couldn't pick up the phone conversation, so this is "
+                  "a fresh session.")
     # the hidden warmup ping is plumbing, not conversation
     brain.session.update(turns=0, out_tokens=0, in_tokens=0, cost=0.0)
     # a configured effort level applies at launch (saved by the spoken
@@ -804,8 +834,10 @@ async def amain():
         signals.set_state("thinking")
         signals.static_start()
         await brain.reset_turn()
-        speak_task = asyncio.create_task(
-            speak_reply(brain, mouth, "(backtalk session started — greet me)"))
+        greet = ("(backtalk picked up the phone conversation — say so "
+                 "briefly and carry on)" if handed_off and brain.resumed
+                 else "(backtalk session started — greet me)")
+        speak_task = asyncio.create_task(speak_reply(brain, mouth, greet))
         speak_task.add_done_callback(lambda _t: arm_pump())
     else:
         signals.set_state("idle")

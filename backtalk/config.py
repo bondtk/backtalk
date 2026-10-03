@@ -122,6 +122,11 @@ DEFAULTS = {
     # A resume that fails falls back to a fresh session and says so in
     # the log. (Grew out of the same community proposal, issue #1.)
     "resume_last_session": False,
+    # Phone hand-off (my-agent/handoff/baton.py): at launch, claim a baton
+    # the phone session set for the Mac and resume that conversation. Only
+    # a live, unclaimed baton does anything; no baton means a fresh start.
+    # false for the phone call-mode copy so a call can never take it.
+    "baton_claim": True,
     # Publish your Claude usage (the five-hour and weekly windows) on the
     # signal bus so a face can draw it. OFF by default and deliberately
     # so: this is your own account spend, and the faces this feeds are

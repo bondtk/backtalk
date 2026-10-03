@@ -27,6 +27,7 @@
     "and the call now"
   ],
   "bg_pump": false,
+  "baton_claim": false,
   "extra_dirs": [
     "/Users/troybond/Jarvis-Vault"
   ],
