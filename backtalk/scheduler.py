@@ -231,7 +231,8 @@ def _save_usage_warned(data):
 def _fetch_usage_text():
     try:
         r = subprocess.run(
-            ["claude", "-p", "/usage", "--output-format", "text"],
+            ["claude", "-p", "/usage", "--output-format", "text",
+             "--no-session-persistence"],
             capture_output=True, text=True, timeout=30,
             cwd=CFG["agent_dir"],
         )
