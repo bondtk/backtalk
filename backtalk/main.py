@@ -62,7 +62,7 @@ import sys
 import threading
 import time
 
-from backtalk import scheduler, signals, sms_watch
+from backtalk import dash_inbox, scheduler, signals, sms_watch
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -211,6 +211,33 @@ def _full_detail(tool, tool_input, ctx):
     return f"use {name}" + (f", {desc[:70]}" if desc else "")
 
 
+def _dash_accept(item):
+    """What a dashboard button may say, and when. Returns the exact text to
+    hand the normal typed-input path (so a button and a spoken phrase run
+    the SAME code), or None to drop it. Anything not listed here is dropped."""
+    kind, text = item.get("kind"), str(item.get("text", ""))
+    if kind == "answer" and text in ("yes", "no"):
+        pending = _PERM["fut"] is not None and not _PERM["fut"].done()
+        return text if pending else None
+    if kind == "console" and console_match(text):
+        return text
+    if kind == "confirm":
+        return "confirm" if _CONFIRM["verb"] else None
+    if kind == "prompt":
+        return dash_inbox.PROMPTS.get(item.get("key"))
+    if kind == "say":
+        # Typed in the dashboard's message bar: the app-mode stand-in for
+        # typing in the terminal, so it takes the SAME path a typed line
+        # does (same conversation, spoken reply, interrupts a reply). It may
+        # never pose as a text from Troy's cell.
+        clean = "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32).strip()
+        if not clean or len(clean) > dash_inbox.SAY_MAX \
+                or clean.startswith(sms_watch.PREFIX):
+            return None
+        return clean
+    return None
+
+
 def make_permission_gate(mouth):
     from claude_agent_sdk import (PermissionResultAllow,
                                   PermissionResultDeny)
@@ -223,6 +250,7 @@ def make_permission_gate(mouth):
         loop = asyncio.get_running_loop()
         signals.static_stop()
         log(f"[perm]   asking: {what}")
+        signals.permission_pending(tool, what, detail)   # the dashboard card
         log(f"[perm]   detail: {detail}")
         if tool == "Bash":   # the FULL command always reaches the log
             log(f"[perm]   full command: {str((tool_input or {}).get('command', ''))[:2000]}")
@@ -274,6 +302,7 @@ def make_permission_gate(mouth):
                 answer = got
         finally:
             _PERM["fut"] = None
+            signals.permission_clear()
         if answer == _INTERRUPT_ANSWER:
             log("[perm]   turn interrupted, denied silently")
             return PermissionResultDeny(
@@ -851,6 +880,11 @@ async def amain():
     # from Troy's cell arrives here as a typed message. Off by default.
     if CFG.get("sms_watch", False):
         sms_watch.start(typed_q, scheduler_stop)
+    # DASHBOARD INBOX: "dash_inbox": true lets the Jarvis dashboard's buttons
+    # (approve/deny, hands-free, model, effort, clear...) arrive as typed
+    # lines. Off by default; the phone-call copy never sets it.
+    if CFG.get("dash_inbox", False):
+        dash_inbox.start(typed_q, scheduler_stop, _dash_accept)
 
     async def run_console(verb):
         """One voice-console verb. The current reply was already
@@ -1208,6 +1242,8 @@ async def amain():
         pass
     finally:
         scheduler_stop.set()  # stop polling for due reminders
+        signals.set_caps()          # dashboard: buttons go grey
+        signals.permission_clear()
         pump_state["down"] = True
         if pump_task and not pump_task.done():
             pump_task.cancel()

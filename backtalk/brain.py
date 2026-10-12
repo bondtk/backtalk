@@ -65,6 +65,44 @@ def _answers_us(rm) -> bool:
     return origin.get("kind") in (None, "human")
 
 
+_KEEP_INPUT = ("file_path", "notebook_path", "command", "pattern", "url",
+               "query", "description", "subagent_type", "run_in_background")
+
+
+def _publish(msg):
+    """Tool calls, tool results and task lifecycle onto the bus for the
+    dashboard. Inputs are trimmed to a few known keys (never file contents).
+    Must never break a turn: everything is swallowed."""
+    try:
+        t = type(msg).__name__
+        if t == "AssistantMessage":
+            for b in getattr(msg, "content", []) or []:
+                if type(b).__name__ == "ToolUseBlock":
+                    inp = {k: (str(v)[:300] if k == "command" else v)
+                           for k, v in (b.input or {}).items()
+                           if k in _KEEP_INPUT}
+                    signals.event("tool_use", id=b.id, tool=b.name, input=inp,
+                                  path=inp.get("file_path", ""),
+                                  parent=getattr(msg, "parent_tool_use_id", None))
+        elif t == "UserMessage":
+            content = getattr(msg, "content", None)
+            for b in content if isinstance(content, list) else []:
+                if type(b).__name__ == "ToolResultBlock":
+                    signals.event("tool_result", id=b.tool_use_id,
+                                  is_error=bool(b.is_error))
+        elif t == "TaskStartedMessage":
+            signals.event("task_started", task_id=msg.task_id,
+                          description=msg.description)
+        elif t == "TaskNotificationMessage":
+            signals.event("task_done", task_id=msg.task_id, status=msg.status)
+        elif t == "TaskUpdatedMessage":
+            st = msg.status or (msg.patch or {}).get("status")
+            if st:
+                signals.event("task_updated", task_id=msg.task_id, status=st)
+    except Exception:
+        pass
+
+
 def _timestamp_tag() -> str:
     """A system-reminder-style tag carrying the real wall-clock time,
     computed fresh at call time — prepended to every real utterance so
@@ -210,6 +248,15 @@ class WarmBrain:
         except Exception:
             pass
 
+    async def _publish_context(self):
+        """Context-window percent for the dashboard, bounded and silent."""
+        try:
+            u = await asyncio.wait_for(self._client.get_context_usage(), 5)
+            signals.set_context(u.get("percentage"), u.get("totalTokens"),
+                                u.get("maxTokens"))
+        except Exception:
+            pass
+
     async def _pull_rate_limits(self):
         """Ask the CLI outright how much of the plan is spent.
 
@@ -295,7 +342,7 @@ class WarmBrain:
         if self._client:
             await self._client.interrupt()
 
-    async def reset_turn(self, timeout: float = 8.0):
+    async def reset_turn(self, timeout: float = 20.0):
         """Re-align the message pipe after an interrupted/failed turn.
 
         THE OFF-BY-ONE BUG, and why this method exists: the SDK client
@@ -340,6 +387,15 @@ class WarmBrain:
             except Exception:
                 pass
             self._client = None
+            # Reattach to the live conversation so the rebuild doesn't wipe
+            # memory (a background agent in flight made the 8s drain time
+            # out twice on 2026-10-07). start() falls back to fresh if the
+            # resume fails.
+            try:
+                with open(CURRENT_SESSION_FILE) as f:
+                    self._resume_id = f.read().strip() or None
+            except OSError:
+                self._resume_id = None
             await self.start()
             self._dirty = False
             self._bg_dirty = False
@@ -359,6 +415,7 @@ class WarmBrain:
         while True:
             saw_result = False
             async for msg in self._client.receive_response():
+                _publish(msg)
                 yield msg
                 if type(msg).__name__ == "ResultMessage":
                     saw_result = True
@@ -382,6 +439,7 @@ class WarmBrain:
         buf = ""
         saw_result = False
         async for msg in self._client.receive_response():
+            _publish(msg)
             t = type(msg).__name__
             if t in ("StreamEvent", "AssistantMessage") and not self._dirty:
                 self._dirty = True
@@ -470,6 +528,8 @@ class WarmBrain:
                 self._tally(msg)
                 self._remember_session(msg)
                 await self._pull_rate_limits()
+                self._context_task = asyncio.create_task(
+                    self._publish_context())   # never holds up the turn
                 break
         tail = buf.strip()
         if tail:

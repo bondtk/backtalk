@@ -246,7 +246,7 @@ DISCIPLINE = (
     "slashes and folder names read one by one — it is unbearable "
     "aloud and carries no meaning by ear. Same for URLs and long "
     "ids: name the thing, not the address. "
-    "Skip any startup sequence; answer directly. "
+    "Do NOT skip the startup sequence: your CLAUDE.md boot rules win, so on the first reply of a session read VAULT-INDEX.md and run the daily briefing when it is due, spoken in plain sentences. After that, answer directly. "
     "VOICE CONSOLE FACTS, answer from these whenever the person asks "
     "you to change a voice-line setting: this session is controlled "
     "by exact spoken phrases, never by you. Permissions: 'stop "

@@ -38,6 +38,7 @@ Every write is wrapped: the bus must never crash the voice line.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -276,4 +277,97 @@ def static_stop():
     try:
         os.remove(_LOADING_PID_FILE)
     except OSError:
+        pass
+
+
+# ---- THE DASHBOARD SEAM (ai-visualizer/dashboard). Same rule as above:
+# every write is wrapped, the bus must never crash the voice line.
+#   .voice_events      JSONL: tool calls, tool results, subagent/task life
+#   .voice_permission  JSON while a spoken permission ask is pending
+#   .voice_context     JSON: context-window percent after each turn
+#   .voice_caps        JSON: what this backtalk offers the dashboard
+_EVENTS_FILE = os.path.join(_DIR, ".voice_events")
+_PERMISSION_FILE = os.path.join(_DIR, ".voice_permission")
+_CONTEXT_FILE = os.path.join(_DIR, ".voice_context")
+_CAPS_FILE = os.path.join(_DIR, ".voice_caps")
+_EVENTS_MAX_BYTES = 512 * 1024
+
+
+# Masked BEFORE anything reaches disk: a Bash command can carry a key.
+_SECRET_RES = [
+    re.compile(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+|basic\s+)?\S+"),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}"),
+    re.compile(r"(?i)((?:api[_-]?key|apikey|access[_-]?key|secret|token|passw(?:or)?d|pwd|client[_-]?secret)"
+               r"[\"']?\s*[:=]\s*[\"']?)[^\s\"'&]+"),
+    re.compile(r"(?i)(--?(?:password|passwd|token|api-key|secret)[ =])\S+"),
+    re.compile(r"(?i)(security\s+add-generic-password\b.*?\s-w\s+)\S+"),
+    re.compile(r"(?i)((?:\s-u|--user)\s+[^:\s]+:)\S+"),          # curl -u user:pass
+    re.compile(r"(://[^/\s:@]+:)[^@\s/]+(?=@)"),                    # scheme://user:pass@
+    re.compile(r"()\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_\-]{16,}"
+               r"|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9\-]{10,}|AIza[0-9A-Za-z_\-]{30,}"
+               r"|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,})"),
+    re.compile(r"()(?<![/\w.-])[A-Za-z0-9+_\-]{32,}={0,2}(?![/\w.])"),   # long random strings
+]
+
+
+def mask_secrets(value):
+    """Mask anything key-, token- or password-shaped, recursively."""
+    if isinstance(value, str):
+        for rx in _SECRET_RES:
+            value = rx.sub(lambda m: m.group(1) + "[masked]", value)
+        return value
+    if isinstance(value, dict):
+        return {k: mask_secrets(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [mask_secrets(v) for v in value]
+    return value
+
+
+def event(kind: str, **fields):
+    """Append one event line (secrets masked); rotate past 512 KB."""
+    try:
+        fields = mask_secrets(fields)
+        try:
+            if os.path.getsize(_EVENTS_FILE) > _EVENTS_MAX_BYTES:
+                os.replace(_EVENTS_FILE, _EVENTS_FILE + ".1")
+        except OSError:
+            pass
+        with open(_EVENTS_FILE, "a") as f:
+            f.write(json.dumps({"ts": time.time(), "kind": kind, **fields},
+                               default=str) + "\n")
+    except Exception:
+        pass
+
+
+def permission_pending(tool: str, what: str, detail: str):
+    try:
+        with open(_PERMISSION_FILE, "w") as f:
+            f.write(json.dumps({"ts": time.time(), "tool": tool,
+                                "what": what, "detail": detail}))
+    except Exception:
+        pass
+
+
+def permission_clear():
+    try:
+        os.remove(_PERMISSION_FILE)
+    except OSError:
+        pass
+
+
+def set_context(percentage, total=None, maximum=None):
+    try:
+        with open(_CONTEXT_FILE, "w") as f:
+            f.write(json.dumps({"ts": time.time(), "percentage": percentage,
+                                "total": total, "max": maximum}))
+    except Exception:
+        pass
+
+
+def set_caps(**caps):
+    """Empty caps = this backtalk is gone; the dashboard greys its buttons."""
+    try:
+        with open(_CAPS_FILE, "w") as f:
+            f.write(json.dumps(caps))
+    except Exception:
         pass
