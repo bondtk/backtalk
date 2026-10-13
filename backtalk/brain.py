@@ -69,6 +69,12 @@ _KEEP_INPUT = ("file_path", "notebook_path", "command", "pattern", "url",
                "query", "description", "subagent_type", "run_in_background")
 
 
+# Task ids of background agents/tasks started but not yet finished. A
+# desync rebuild disconnects the CLI, which KILLS them, so reset_turn
+# must not rebuild while any are in flight (2026-10-13 fix).
+_AGENTS_RUNNING: set = set()
+
+
 def _publish(msg):
     """Tool calls, tool results and task lifecycle onto the bus for the
     dashboard. Inputs are trimmed to a few known keys (never file contents).
@@ -91,9 +97,11 @@ def _publish(msg):
                     signals.event("tool_result", id=b.tool_use_id,
                                   is_error=bool(b.is_error))
         elif t == "TaskStartedMessage":
+            _AGENTS_RUNNING.add(msg.task_id)
             signals.event("task_started", task_id=msg.task_id,
                           description=msg.description)
         elif t == "TaskNotificationMessage":
+            _AGENTS_RUNNING.discard(msg.task_id)
             signals.event("task_done", task_id=msg.task_id, status=msg.status)
         elif t == "TaskUpdatedMessage":
             st = msg.status or (msg.patch or {}).get("status")
@@ -376,6 +384,15 @@ class WarmBrain:
             self._dirty = False
             self._bg_dirty = False
         except Exception:
+            if _AGENTS_RUNNING:
+                # A rebuild would kill the running background agents.
+                # The drain only timed out because nothing is left to
+                # drain (agent chatter, not a stale turn): stay put.
+                log(f"[brain] drain timed out with {len(_AGENTS_RUNNING)} "
+                    "background agent(s) running — NOT rebuilding")
+                self._dirty = False
+                self._bg_dirty = False
+                return
             # Can't re-align — rebuild the session rather than run
             # desynced. Loses this voice session's conversation memory;
             # better than answering every question one turn late for the
@@ -441,6 +458,12 @@ class WarmBrain:
         async for msg in self._client.receive_response():
             _publish(msg)
             t = type(msg).__name__
+            if getattr(msg, "parent_tool_use_id", None):
+                # A background AGENT's own chatter, not a turn of ours:
+                # never mark the pipe dirty for it, or the next utterance
+                # drains for 20 s, times out and rebuilds the session,
+                # killing the agent (2026-10-13 fix).
+                continue
             if t in ("StreamEvent", "AssistantMessage") and not self._dirty:
                 self._dirty = True
                 self._bg_dirty = True
